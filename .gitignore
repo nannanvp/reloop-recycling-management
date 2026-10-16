@@ -1,0 +1,14 @@
+.local/
+target/
+node_modules/
+*.log
+*.dmp
+.env
+application-local.properties
+Professor Material/
+test-results/
+submission/
+plan.md
+BACSE202_DATABASE-SYSTEMS_ELA_1.0_80_BACSE202.md
+__pycache__/
+*.pyc

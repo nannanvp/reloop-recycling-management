@@ -1,0 +1,123 @@
+package com.reloop.app;
+
+import java.math.BigDecimal;
+import java.sql.*;
+import java.time.LocalDate;
+import java.util.*;
+import org.springframework.dao.DataAccessException;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.ConnectionCallback;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
+
+/** Explicit, parameterized Oracle JDBC operations. Authorization always uses the session user. */
+@RestController
+@RequestMapping("/api")
+public class OperationsController {
+    private final JdbcTemplate db;
+    private final PasswordEncoder passwords;
+    public OperationsController(JdbcTemplate db, PasswordEncoder passwords) { this.db=db; this.passwords=passwords; }
+    private static final String PICKUP_SELECT="SELECT p.*, u.full_name citizen_name,c.name centre_name FROM RC_PICKUPS p JOIN RC_USERS u ON u.id=p.citizen_id JOIN RC_CENTRES c ON c.id=p.centre_id";
+
+    static Map<String,Object> row(ResultSet rs) throws SQLException {
+        Map<String,Object> result=new LinkedHashMap<>();
+        ResultSetMetaData meta=rs.getMetaData();
+        for(int i=1;i<=meta.getColumnCount();i++) {
+            String[] parts=meta.getColumnLabel(i).toLowerCase(Locale.ROOT).split("_");
+            StringBuilder key=new StringBuilder(parts[0]);
+            for(int j=1;j<parts.length;j++) if(!parts[j].isEmpty()) key.append(Character.toUpperCase(parts[j].charAt(0))).append(parts[j].substring(1));
+            Object value=rs.getObject(i);
+            // Oracle getObject may return oracle.sql.TIMESTAMP, which JSON cannot serialize.
+            if(value!=null && (meta.getColumnType(i)==Types.TIMESTAMP||meta.getColumnType(i)==Types.TIMESTAMP_WITH_TIMEZONE)) value=rs.getTimestamp(i).toLocalDateTime().toString();
+            else if(value!=null && meta.getColumnType(i)==Types.DATE) value=rs.getDate(i).toLocalDate().toString();
+            if(value!=null && (key.toString().equals("preferredDate")||key.toString().equals("scheduledDate"))) value=rs.getDate(i).toLocalDate().toString();
+            if(value instanceof java.sql.Date date) value=date.toLocalDate().toString();
+            else if(value instanceof Timestamp timestamp) value=timestamp.toLocalDateTime().toString();
+            else if(value instanceof Clob clob) value=clob.getSubString(1,(int)clob.length());
+            result.put(key.toString(),value);
+        }
+        return result;
+    }
+    private List<Map<String,Object>> query(String sql,Object...args) { return db.query(sql,(rs,n)->row(rs),args); }
+    private Map<String,Object> one(String sql,Object...args) { var rows=query(sql,args); if(rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Record not found"); return rows.get(0); }
+    private Map<String,Object> current() { return one("SELECT id,full_name,email,role,centre_id FROM RC_USERS WHERE email=? AND active=1",SecurityContextHolder.getContext().getAuthentication().getName()); }
+    private long id(Map<String,Object> x,String key) { Object v=x.get(key); if(v==null) throw bad(key+" is required"); try{return new BigDecimal(v.toString()).longValueExact();}catch(Exception ex){throw bad(key+" must be a whole number");} }
+    private String text(Map<String,Object> x,String key,int max) { String v=Objects.toString(x.get(key),"").trim(); if(v.isEmpty()||v.length()>max) throw bad(key+" is required and must be at most "+max+" characters"); return v; }
+    private BigDecimal decimal(Map<String,Object> x,String key) { try{BigDecimal value=new BigDecimal(Objects.toString(x.get(key),"")).setScale(3,java.math.RoundingMode.UNNECESSARY);if(value.abs().compareTo(new BigDecimal("9999999.999"))>0)throw new IllegalArgumentException();return value;}catch(Exception ex){throw bad(key+" must be a number with at most three decimal places and magnitude at most 9999999.999");} }
+    private String notes(Map<String,Object> x) {String value=Objects.toString(x.get("notes"),"").trim();if(value.length()>1000)throw bad("Notes must be at most 1000 characters");return value;}
+    private long rate(Map<String,Object> x) {long value=id(x,"pointsPerKg");if(value<0||value>99999999)throw bad("Points rate must be a whole number between 0 and 99999999");return value;}
+    private java.sql.Date date(Map<String,Object> x,String key) { try{return java.sql.Date.valueOf(LocalDate.parse(text(x,key,10)));}catch(Exception e){throw bad(key+" must be a valid YYYY-MM-DD date");} }
+    private String role(Map<String,Object> u) {return u.get("role").toString();}
+    private void admin(Map<String,Object> u) { if(!role(u).equals("ADMIN")) throw new ResponseStatusException(HttpStatus.FORBIDDEN,"Administrator access required"); }
+    private void worker(Map<String,Object> u) { if(role(u).equals("CITIZEN")) throw new ResponseStatusException(HttpStatus.FORBIDDEN,"Staff access required"); }
+    private String scope(Map<String,Object> u,String alias) { return switch(role(u)) {case "CITIZEN" -> " AND "+alias+".citizen_id="+id(u,"id");case "STAFF" -> " AND "+alias+".centre_id="+id(u,"centreId");default -> "";}; }
+    private void centreScope(Map<String,Object> u,long centreId) {worker(u);if(role(u).equals("STAFF")&&id(u,"centreId")!=centreId) throw new ResponseStatusException(HttpStatus.FORBIDDEN,"This centre is outside your assignment");}
+    private ResponseStatusException bad(String message) {return new ResponseStatusException(HttpStatus.BAD_REQUEST,message);}
+    private void state(boolean condition,String message) {if(!condition) throw new ResponseStatusException(HttpStatus.CONFLICT,message);}
+    private Map<String,Object> list(List<Map<String,Object>> rows) {return Map.of("items",rows,"total",rows.size());}
+    private long insert(String sql,Object...args) {
+        return db.execute((ConnectionCallback<Long>) connection->{try(PreparedStatement statement=connection.prepareStatement(sql,new String[]{"ID"})){for(int i=0;i<args.length;i++)statement.setObject(i+1,args[i]);statement.executeUpdate();try(ResultSet keys=statement.getGeneratedKeys()){if(!keys.next())throw new SQLException("Insert returned no ID");return keys.getLong(1);}}});
+    }
+    private void actor(Map<String,Object> u) {db.execute((ConnectionCallback<Void>) c->{try(CallableStatement s=c.prepareCall("BEGIN DBMS_SESSION.SET_IDENTIFIER(?); END;")){s.setString(1,String.valueOf(id(u,"id")));s.execute();}return null;});}
+    private void clearActor() {db.execute((ConnectionCallback<Void>) c->{try(CallableStatement s=c.prepareCall("BEGIN DBMS_SESSION.CLEAR_IDENTIFIER; END;")){s.execute();}return null;});}
+    private Map<String,Object> pickup(Map<String,Object> u,long pickupId,boolean lock) {return one("SELECT p.* FROM RC_PICKUPS p WHERE p.id=?"+scope(u,"p")+(lock?" FOR UPDATE":""),pickupId);}
+
+    @GetMapping("/dashboard")
+    public Map<String,Object> dashboard() {
+        var u=current();String scope=scope(u,"p");
+        var result=one("SELECT COUNT(*) total_pickups,NVL(SUM(CASE WHEN p.status IN ('REQUESTED','SCHEDULED') THEN 1 ELSE 0 END),0) pending_pickups FROM RC_PICKUPS p WHERE 1=1"+scope);
+        result.putAll(one("SELECT NVL(SUM(i.collected_kg),0) collected_kg,NVL(SUM(i.accepted_kg),0) accepted_kg,NVL(SUM(CASE WHEN i.batch_id IS NULL AND p.status='COLLECTED' THEN i.accepted_kg ELSE 0 END),0) available_kg FROM RC_PICKUPS p JOIN RC_PICKUP_ITEMS i ON i.pickup_id=p.id WHERE 1=1"+scope));
+        if(role(u).equals("CITIZEN")) result.putAll(one("SELECT total_points FROM VW_CITIZEN_REWARDS WHERE citizen_id=?",id(u,"id")));
+        else result.putAll(one("SELECT NVL(SUM(r.points),0) total_points FROM RC_REWARD_LEDGER r JOIN RC_PICKUP_ITEMS i ON i.id=r.pickup_item_id JOIN RC_PICKUPS p ON p.id=i.pickup_id WHERE 1=1"+scope));
+        result.put("recentPickups",query(PICKUP_SELECT+" WHERE 1=1"+scope+" ORDER BY p.created_at DESC FETCH FIRST 6 ROWS ONLY"));
+        return result;
+    }
+    @GetMapping("/centres") public Map<String,Object> centres(){current();return list(query("SELECT * FROM RC_CENTRES ORDER BY name"));}
+    @GetMapping("/materials") public Map<String,Object> materials(){current();return list(query("SELECT * FROM RC_MATERIALS ORDER BY name"));}
+    @PostMapping("/centres") @Transactional public Map<String,Object> addCentre(@RequestBody Map<String,Object> x){admin(current());long n=insert("INSERT INTO RC_CENTRES(name,address,active) VALUES(?,?,1)",text(x,"name",100),text(x,"address",500));return one("SELECT * FROM RC_CENTRES WHERE id=?",n);}
+    @PatchMapping("/centres/{n}") @Transactional public Map<String,Object> editCentre(@PathVariable long n,@RequestBody Map<String,Object> x){admin(current());var old=one("SELECT * FROM RC_CENTRES WHERE id=?",n);old.putAll(x);db.update("UPDATE RC_CENTRES SET name=?,address=?,active=? WHERE id=?",text(old,"name",100),text(old,"address",500),active(old),n);return one("SELECT * FROM RC_CENTRES WHERE id=?",n);}
+    @PostMapping("/materials") @Transactional public Map<String,Object> addMaterial(@RequestBody Map<String,Object> x){admin(current());long rate=rate(x);long n=insert("INSERT INTO RC_MATERIALS(name,points_per_kg,active) VALUES(?,?,1)",text(x,"name",100),rate);return one("SELECT * FROM RC_MATERIALS WHERE id=?",n);}
+    @PatchMapping("/materials/{n}") @Transactional public Map<String,Object> editMaterial(@PathVariable long n,@RequestBody Map<String,Object> x){admin(current());var old=one("SELECT * FROM RC_MATERIALS WHERE id=?",n);old.putAll(x);long rate=rate(old);db.update("UPDATE RC_MATERIALS SET name=?,points_per_kg=?,active=? WHERE id=?",text(old,"name",100),rate,active(old),n);return one("SELECT * FROM RC_MATERIALS WHERE id=?",n);}
+    private int active(Map<String,Object>x){Object a=x.getOrDefault("active",1);if(Boolean.TRUE.equals(a)||"1".equals(Objects.toString(a)))return 1;if(Boolean.FALSE.equals(a)||"0".equals(Objects.toString(a)))return 0;throw bad("Active must be true, false, 1 or 0");}
+    @DeleteMapping("/centres/{n}") @Transactional public Map<String,Object> deleteCentre(@PathVariable long n){admin(current());state(db.update("DELETE FROM RC_CENTRES WHERE id=?",n)==1,"Centre does not exist");return Map.of("deleted",true);}
+    @DeleteMapping("/materials/{n}") @Transactional public Map<String,Object> deleteMaterial(@PathVariable long n){admin(current());state(db.update("DELETE FROM RC_MATERIALS WHERE id=?",n)==1,"Material does not exist");return Map.of("deleted",true);}
+    @GetMapping("/users") public Map<String,Object> users(){admin(current());return list(query("SELECT id,full_name,email,role,centre_id,active FROM RC_USERS ORDER BY id"));}
+    @PostMapping("/users") @Transactional public Map<String,Object> addUser(@RequestBody Map<String,Object>x){admin(current());String role=text(x,"role",20);validateRole(role);String password=text(x,"password",128);if(password.length()<8||password.getBytes(java.nio.charset.StandardCharsets.UTF_8).length>72)throw bad("Password must contain at least 8 characters and at most 72 UTF-8 bytes");Object centre=role.equals("STAFF")?id(x,"centreId"):null;long n=insert("INSERT INTO RC_USERS(full_name,email,password_hash,role,centre_id,active) VALUES(?,?,?,?,?,1)",text(x,"fullName",100),text(x,"email",200).toLowerCase(Locale.ROOT),passwords.encode(password),role,centre);return one("SELECT id,full_name,email,role,centre_id,active FROM RC_USERS WHERE id=?",n);}
+    private void validateRole(String r){if(!Set.of("CITIZEN","STAFF","ADMIN").contains(r))throw bad("Invalid role");}
+    @PatchMapping("/users/{n}") @Transactional public Map<String,Object> editUser(@PathVariable long n,@RequestBody Map<String,Object>x){var u=current();admin(u);var old=one("SELECT id,full_name,email,role,centre_id,active FROM RC_USERS WHERE id=?",n);old.putAll(x);String r=text(old,"role",20);validateRole(r);if(id(u,"id")==n&&(!r.equals("ADMIN")||active(old)!=1))throw bad("You cannot remove your own administrator access");db.update("UPDATE RC_USERS SET full_name=?,role=?,centre_id=?,active=? WHERE id=?",text(old,"fullName",100),r,r.equals("STAFF")?id(old,"centreId"):null,active(old),n);return one("SELECT id,full_name,email,role,centre_id,active FROM RC_USERS WHERE id=?",n);}
+
+    @GetMapping("/pickups") public Map<String,Object> pickups(@RequestParam(required=false) String status,@RequestParam(required=false) String search,@RequestParam(defaultValue="0") int page,@RequestParam(defaultValue="25") int size){var u=current();String sql=PICKUP_SELECT+" WHERE 1=1"+scope(u,"p");List<Object> args=new ArrayList<>();if(status!=null&&!status.isBlank()){sql+=" AND p.status=?";args.add(status);}if(search!=null&&!search.isBlank()){sql+=" AND (LOWER(u.full_name) LIKE ? OR LOWER(p.pickup_address) LIKE ?)";args.add("%"+search.toLowerCase(Locale.ROOT)+"%");args.add("%"+search.toLowerCase(Locale.ROOT)+"%");}long total=db.queryForObject("SELECT COUNT(*) FROM ("+sql+")",Long.class,args.toArray());args.add((long)Math.max(0,page)*Math.min(100,Math.max(1,size)));args.add(Math.min(100,Math.max(1,size)));return Map.of("items",query(sql+" ORDER BY p.created_at DESC OFFSET ? ROWS FETCH NEXT ? ROWS ONLY",args.toArray()),"total",total);}
+    @GetMapping("/pickups/{n}") public Map<String,Object> pickupDetail(@PathVariable long n){var u=current();var p=one(PICKUP_SELECT+" WHERE p.id=?"+scope(u,"p"),n);p.put("items",query("SELECT i.*,m.name material_name FROM RC_PICKUP_ITEMS i JOIN RC_MATERIALS m ON m.id=i.material_id WHERE i.pickup_id=? ORDER BY i.id",n));return p;}
+    @PostMapping("/pickups") @Transactional public Map<String,Object> addPickup(@RequestBody Map<String,Object>x){var u=current();long citizen=role(u).equals("CITIZEN")?id(u,"id"):id(x,"citizenId");one("SELECT id FROM RC_USERS WHERE id=? AND role='CITIZEN' AND active=1",citizen);long centre=id(x,"centreId");if(role(u).equals("STAFF"))centreScope(u,centre);one("SELECT id FROM RC_CENTRES WHERE id=? AND active=1",centre);long n=insert("INSERT INTO RC_PICKUPS(citizen_id,centre_id,pickup_address,preferred_date,status,notes) VALUES(?,?,?,?,'REQUESTED',?)",citizen,centre,text(x,"pickupAddress",500),date(x,"preferredDate"),notes(x));writeItems(n,x);return pickupDetail(n);}
+    @SuppressWarnings("unchecked") private void writeItems(long pickupId,Map<String,Object>x){Object raw=x.get("items");if(!(raw instanceof List<?> items)||items.isEmpty()||items.size()>30)throw bad("Provide between 1 and 30 material lines");Set<Long> seen=new HashSet<>();for(Object value:items){if(!(value instanceof Map))throw bad("Invalid material line");Map<String,Object> item=(Map<String,Object>)value;long material=id(item,"materialId");if(!seen.add(material))throw bad("Each material can appear only once");one("SELECT id FROM RC_MATERIALS WHERE id=? AND active=1",material);BigDecimal weight=decimal(item,"estimatedKg");if(weight.signum()<=0)throw bad("Estimated weight must be positive");db.update("INSERT INTO RC_PICKUP_ITEMS(pickup_id,material_id,estimated_kg) VALUES(?,?,?)",pickupId,material,weight);}}
+    @PatchMapping("/pickups/{n}") @Transactional public Map<String,Object> editPickup(@PathVariable long n,@RequestBody Map<String,Object>x){var u=current();var old=pickup(u,n,true);state("REQUESTED".equals(old.get("status")),"Only requested pickups can be edited");old.putAll(x);long centre=id(old,"centreId");if(role(u).equals("STAFF"))centreScope(u,centre);one("SELECT id FROM RC_CENTRES WHERE id=? AND active=1",centre);db.update("UPDATE RC_PICKUPS SET centre_id=?,pickup_address=?,preferred_date=?,notes=?,updated_at=SYSTIMESTAMP WHERE id=?",centre,text(old,"pickupAddress",500),date(old,"preferredDate"),notes(old),n);if(x.containsKey("items")){db.update("DELETE FROM RC_PICKUP_ITEMS WHERE pickup_id=?",n);writeItems(n,x);}return pickupDetail(n);}
+    @DeleteMapping("/pickups/{n}") @Transactional public Map<String,Object> deletePickup(@PathVariable long n){var u=current();var p=pickup(u,n,true);state("REQUESTED".equals(p.get("status")),"Only requested pickups can be deleted");db.update("DELETE FROM RC_PICKUP_ITEMS WHERE pickup_id=?",n);db.update("DELETE FROM RC_PICKUPS WHERE id=?",n);return Map.of("deleted",true);}
+    @PostMapping("/pickups/{n}/schedule") @Transactional public Map<String,Object> schedule(@PathVariable long n,@RequestBody Map<String,Object>x){var u=current();worker(u);var p=pickup(u,n,true);state("REQUESTED".equals(p.get("status")),"Only requested pickups can be scheduled");actor(u);try{db.update("UPDATE RC_PICKUPS SET status='SCHEDULED',scheduled_date=?,updated_at=SYSTIMESTAMP WHERE id=?",date(x,"scheduledDate"),n);}finally{clearActor();}return pickupDetail(n);}
+    @PostMapping("/pickups/{n}/cancel") @Transactional public Map<String,Object> cancel(@PathVariable long n){var u=current();worker(u);var p=pickup(u,n,true);state(Set.of("REQUESTED","SCHEDULED").contains(p.get("status")),"This request can no longer be cancelled");actor(u);try{db.update("UPDATE RC_PICKUPS SET status='CANCELLED',updated_at=SYSTIMESTAMP WHERE id=?",n);}finally{clearActor();}return pickupDetail(n);}
+    @PostMapping("/pickups/{n}/collect") @Transactional @SuppressWarnings("unchecked") public Map<String,Object> collect(@PathVariable long n,@RequestBody Map<String,Object>x){var u=current();worker(u);var snapshot=pickup(u,n,false);one("SELECT id FROM RC_CENTRES WHERE id=? FOR UPDATE",id(snapshot,"centreId"));var p=pickup(u,n,true);state("SCHEDULED".equals(p.get("status")),"Only scheduled pickups can be collected");var stored=query("SELECT id FROM RC_PICKUP_ITEMS WHERE pickup_id=?",n);if(!(x.get("items") instanceof List<?> items)||items.size()!=stored.size())throw bad("Enter weights for every pickup line");Set<Long> allowed=new HashSet<>();stored.forEach(i->allowed.add(id(i,"id")));for(Object raw:items){if(!(raw instanceof Map))throw bad("Invalid line");var item=(Map<String,Object>)raw;long itemId=id(item,"itemId");if(!allowed.remove(itemId))throw bad("Duplicate or foreign pickup line");BigDecimal collected=decimal(item,"collectedKg"),accepted=decimal(item,"acceptedKg");if(collected.signum()<0||accepted.signum()<0||accepted.compareTo(collected)>0)throw bad("Weights require 0 ≤ accepted ≤ collected");db.update("UPDATE RC_PICKUP_ITEMS SET collected_kg=?,accepted_kg=? WHERE id=? AND pickup_id=?",collected,accepted,itemId,n);}actor(u);try{db.execute((ConnectionCallback<Void>) c->{try(CallableStatement s=c.prepareCall("{call PR_CONFIRM_COLLECTION(?,?)}")){s.setLong(1,n);s.setLong(2,id(u,"id"));s.execute();}return null;});}finally{clearActor();}return pickupDetail(n);}
+    @PostMapping("/pickups/{n}/post-rewards") @Transactional public Map<String,Object> postRewards(@PathVariable long n){var u=current();worker(u);pickup(u,n,false);int rows=db.execute((ConnectionCallback<Integer>) c->{try(CallableStatement s=c.prepareCall("{call PR_POST_REWARDS(?,?,?)}")){s.setLong(1,n);s.setLong(2,id(u,"id"));s.registerOutParameter(3,Types.NUMERIC);s.execute();return s.getInt(3);}});return Map.of("rowsAdded",rows,"message",rows==0?"Rewards already posted; no duplicates added":"Reward points posted");}
+    @GetMapping("/rewards") public Map<String,Object> rewards(){var u=current();return list(query("SELECT r.*,i.material_id,m.name material_name,p.id pickup_id,u.full_name citizen_name FROM RC_REWARD_LEDGER r JOIN RC_PICKUP_ITEMS i ON i.id=r.pickup_item_id JOIN RC_PICKUPS p ON p.id=i.pickup_id JOIN RC_MATERIALS m ON m.id=i.material_id JOIN RC_USERS u ON u.id=p.citizen_id WHERE 1=1"+scope(u,"p")+" ORDER BY r.created_at DESC FETCH FIRST 100 ROWS ONLY"));}
+    @GetMapping("/batches") public Map<String,Object> batches(){var u=current();worker(u);String filter=role(u).equals("STAFF")?" WHERE b.centre_id="+id(u,"centreId"):"";return list(query("SELECT b.*,c.name centre_name,m.name material_name,(SELECT SUM(i.accepted_kg) FROM RC_PICKUP_ITEMS i WHERE i.batch_id=b.id) input_kg FROM RC_BATCHES b JOIN RC_CENTRES c ON c.id=b.centre_id JOIN RC_MATERIALS m ON m.id=b.material_id"+filter+" ORDER BY b.processed_at DESC FETCH FIRST 100 ROWS ONLY"));}
+    @PostMapping("/batches") @Transactional public Map<String,Object> process(@RequestBody Map<String,Object>x){var u=current();long centre=id(x,"centreId"),material=id(x,"materialId");centreScope(u,centre);BigDecimal output=decimal(x,"outputKg");if(output.signum()<0)throw bad("Output weight cannot be negative");long n=db.execute((ConnectionCallback<Long>) c->{try(CallableStatement s=c.prepareCall("{call PR_PROCESS_MATERIAL(?,?,?,?,?)}")){s.setLong(1,centre);s.setLong(2,material);s.setBigDecimal(3,output);s.setLong(4,id(u,"id"));s.registerOutParameter(5,Types.NUMERIC);s.execute();return s.getLong(5);}});return one("SELECT * FROM RC_BATCHES WHERE id=?",n);}
+
+    @GetMapping("/reports/{reportId}") public Map<String,Object> report(@PathVariable String reportId,@RequestParam(required=false) Long centreId){var u=current();worker(u);String pscope=scope(u,"p");String centreFilter=role(u).equals("STAFF")?" WHERE centre_id="+id(u,"centreId"):"";
+        return switch(reportId){
+            case "centre-materials","centres","totals" -> list(query("SELECT * FROM VW_CENTRE_MATERIAL_TOTALS"+centreFilter));
+            case "pickup-details","pickups","joins" -> list(query("SELECT * FROM VW_PICKUP_DETAILS"+centreFilter+" FETCH FIRST 100 ROWS ONLY"));
+            case "batches" -> list(query("SELECT * FROM VW_BATCH_SUMMARY"+centreFilter));
+            case "available" -> list(query("SELECT p.centre_id,c.name centre_name,i.material_id,m.name material_name,SUM(i.accepted_kg) available_kg FROM RC_PICKUP_ITEMS i JOIN RC_PICKUPS p ON p.id=i.pickup_id JOIN RC_CENTRES c ON c.id=p.centre_id JOIN RC_MATERIALS m ON m.id=i.material_id WHERE p.status='COLLECTED' AND i.batch_id IS NULL"+pscope+" GROUP BY p.centre_id,c.name,i.material_id,m.name HAVING SUM(i.accepted_kg)>0 ORDER BY c.name,m.name"));
+            case "above-average","above-average-citizens" -> list(query("WITH totals AS (SELECT p.citizen_id,u.full_name,SUM(i.accepted_kg) accepted_kg FROM RC_PICKUPS p JOIN RC_PICKUP_ITEMS i ON i.pickup_id=p.id JOIN RC_USERS u ON u.id=p.citizen_id WHERE p.status='COLLECTED'"+pscope+" GROUP BY p.citizen_id,u.full_name) SELECT * FROM totals WHERE accepted_kg > (SELECT AVG(accepted_kg) FROM totals)"));
+            case "unused-materials","never-collected" -> list(query("SELECT m.id,m.name FROM RC_MATERIALS m WHERE NOT EXISTS (SELECT 1 FROM RC_PICKUP_ITEMS i JOIN RC_PICKUPS p ON p.id=i.pickup_id WHERE i.material_id=m.id AND p.status='COLLECTED'"+pscope+")"));
+            case "pending-centres" -> list(query("SELECT c.id,c.name FROM RC_CENTRES c WHERE EXISTS (SELECT 1 FROM RC_PICKUPS p WHERE p.centre_id=c.id AND p.status IN ('REQUESTED','SCHEDULED')"+pscope+")"));
+            case "functions" -> list(query("SELECT UPPER(m.name) material_name,LENGTH(m.name) name_length,COUNT(*) collections,ROUND(AVG(i.accepted_kg),3) average_kg,MIN(i.accepted_kg) minimum_kg,MAX(i.accepted_kg) maximum_kg,SUM(i.accepted_kg) total_kg FROM RC_PICKUP_ITEMS i JOIN RC_MATERIALS m ON m.id=i.material_id JOIN RC_PICKUPS p ON p.id=i.pickup_id WHERE p.status='COLLECTED'"+pscope+" GROUP BY m.name ORDER BY total_kg DESC"));
+            case "cursor" -> {long centre=role(u).equals("STAFF")?id(u,"centreId"):(centreId==null?1:centreId);centreScope(u,centre);yield list(db.execute((ConnectionCallback<List<Map<String,Object>>>) c->{try(CallableStatement s=c.prepareCall("{call PR_CENTRE_COLLECTION_REPORT(?,?)}")){s.setLong(1,centre);s.registerOutParameter(2,Types.REF_CURSOR);s.execute();List<Map<String,Object>> result=new ArrayList<>();try(ResultSet rs=(ResultSet)s.getObject(2)){while(rs.next()&&result.size()<100)result.add(row(rs));}return result;}}));}
+            default -> throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Unknown report");
+        };
+    }
+    @ExceptionHandler(DataAccessException.class) @ResponseStatus(HttpStatus.CONFLICT)
+    public Map<String,Object> databaseError(DataAccessException ex){String message=Objects.toString(ex.getMostSpecificCause().getMessage(),"");if(message.contains("ORA-02292"))return Map.of("message","This record is used by existing records. Deactivate it instead.");if(message.contains("ORA-00001"))return Map.of("message","A record with these values already exists.");if(message.contains("ORA-20")){int start=message.indexOf("ORA-20");String first=message.substring(start).split("\\R")[0];return Map.of("message",first.replaceFirst("ORA-\\d+:\\s*",""));}return Map.of("message","The database could not complete this operation. Check the input and database connection.");}
+}

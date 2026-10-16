@@ -1,0 +1,8 @@
+# Configure environment variables, or use the ignored .local/db-secrets.json
+RC_DB_URL=jdbc:oracle:thin:@//localhost:1521/XEPDB1
+RC_DB_USER=RC_APP
+RC_DB_PASSWORD=<local application database password>
+RC_LAB_USER=RC_LAB
+RC_LAB_PASSWORD=<local sandbox database password>
+# Database setup generates .local/db-secrets.json without printing passwords.
+# First application boot seeds users and writes .local/demo-logins.txt.
