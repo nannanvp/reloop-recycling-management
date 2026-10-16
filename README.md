@@ -2,6 +2,19 @@
 
 ReLoop is a locally hosted recycling-management demonstration for BACSE202. It uses Oracle XE 21c, Oracle SQL and PL/SQL, Java 17, Spring Boot 3.5.7, Maven, and JDBC. The app listens on `http://localhost:8080` and connects to the local `XEPDB1` service.
 
+## Windows setup with one BAT file
+
+1. [Download Setup-ReLoop.bat](https://raw.githubusercontent.com/nannanvp/reloop-recycling-management/main/Setup-ReLoop.bat) and save it with the `.bat` extension, not `.bat.txt`.
+2. Double-click it. Internet access is required. You do not need Git, Java, or Maven preinstalled.
+3. If Oracle XE is missing, choose whether to download its official installer (about 2 GB). Complete the visible Oracle wizard, accept its terms only if you agree, and choose your Oracle administrator password. Administrator privileges and an Oracle-supported Windows x64 edition are required; this is not an unattended Oracle installation.
+4. When setup finishes, the browser and your locally generated demo login information open automatically.
+
+The default destination is `%LOCALAPPDATA%\ReLoop`. The installer downloads a pinned revision of this public repository, installs checksum-verified Java 17 and Maven 3.9.9 in its `.local` directory, detects/starts Oracle XE, prepares the schema, builds the application, and checks HTTP readiness. The existing Oracle installation and global Java configuration are preserved. Downloaded archives are cached in `%LOCALAPPDATA%\ReLoop-InstallerCache`.
+
+For later use, double-click the generated `Start-ReLoop.bat` or `Stop-ReLoop.bat` **inside the installation folder**. Running `Setup-ReLoop.bat` again resumes the existing managed installation; it does not update source or reset data. A nonempty unrelated destination is refused. If this PC already has ReLoop's Oracle accounts but the new folder lacks their credentials, setup stops and explains how to reuse your existing private `.local\db-secrets.json`; it never resets those accounts.
+
+See [Windows installer details and troubleshooting](docs/windows-setup.md) for requirements, custom folders, and recovery steps. Manual setup remains available below.
+
 ## Requirements
 
 - Windows PowerShell

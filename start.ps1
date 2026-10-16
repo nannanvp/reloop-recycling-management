@@ -1,10 +1,20 @@
 param([switch]$BuildOnly)
 $ErrorActionPreference='Stop'
 Set-Location $PSScriptRoot
-if(-not $BuildOnly -and (Test-Path -LiteralPath '.local/server.pid')){
+$taskExpectedJar=Join-Path $PSScriptRoot 'target/reloop-1.0.0.jar'
+if(Test-Path -LiteralPath '.local/server.pid'){
  $taskExistingPid=[int](Get-Content -LiteralPath '.local/server.pid')
  $taskExisting=Get-CimInstance Win32_Process -Filter "ProcessId=$taskExistingPid" -ErrorAction SilentlyContinue
- if($taskExisting -and ($taskExisting.CommandLine -like '*reloop-1.0.0.jar*')){Write-Host 'ReLoop is already running: http://localhost:8080';Write-Host 'Use .\stop.ps1 before rebuilding changed source.';exit 0}
+ $taskSameJar=$taskExisting -and $taskExisting.CommandLine -and ($taskExisting.CommandLine.Contains($taskExpectedJar) -or ($taskExisting.CommandLine.Contains('target/reloop-1.0.0.jar') -and $taskExisting.ExecutablePath -and $taskExisting.ExecutablePath.StartsWith((Join-Path $PSScriptRoot '.local/java'),[StringComparison]::OrdinalIgnoreCase)))
+ if($taskSameJar){
+  if($BuildOnly){throw 'This ReLoop JAR is running. Use .\stop.ps1 before rebuilding.'}
+  try{$null=Invoke-WebRequest 'http://127.0.0.1:8080/api/auth/csrf' -UseBasicParsing -TimeoutSec 5}catch{throw 'The recorded ReLoop process is not responding yet. Check .local/server.log, or stop it and retry.'}
+  Write-Host 'ReLoop is already running: http://localhost:8080';Write-Host 'Use .\stop.ps1 before rebuilding changed source.';exit 0
+ }
+}
+if(-not $BuildOnly){
+ $taskPortProbe=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,8080)
+ try{$taskPortProbe.Start()}catch{throw 'Port 8080 is already occupied by another process or ReLoop installation. Stop that process before starting this copy.'}finally{$taskPortProbe.Stop()}
 }
 $taskJdk=Get-ChildItem -LiteralPath '.local/java' -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
 if($taskJdk){$env:JAVA_HOME=$taskJdk.FullName;$env:PATH="$($taskJdk.FullName)\bin;$env:PATH"}
