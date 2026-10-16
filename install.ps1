@@ -4,8 +4,8 @@ param(
  [string]$Revision,
  [string]$InstallDir = $(if($env:RELOOP_INSTALL_DIR){$env:RELOOP_INSTALL_DIR}else{Join-Path $env:LOCALAPPDATA 'ReLoop'}),
  [int]$OraclePort = 1521,
- [switch]$NoBrowser,
- [switch]$NonInteractive,
+ [switch]$NoBrowser = ($env:RELOOP_NO_BROWSER -eq '1'),
+ [switch]$NonInteractive = ($env:RELOOP_NONINTERACTIVE -eq '1'),
  [switch]$LibraryOnly
 )
 $ErrorActionPreference='Stop'

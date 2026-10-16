@@ -41,7 +41,7 @@ For advanced use, run the repository's PowerShell installer directly:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -InstallDir "D:\Projects\ReLoop" -OraclePort 1521 -NoBrowser
 ```
 
-`-NonInteractive` refuses to install a missing Oracle database rather than opening its wizard. `RELOOP_NO_PAUSE=1` disables the BAT's final keypress pause. `-LibraryOnly` is reserved for the installer tests and does not perform installation.
+`-NonInteractive` (or `RELOOP_NONINTERACTIVE=1`) refuses to install a missing Oracle database rather than opening its wizard. `RELOOP_NO_PAUSE=1` disables the BAT's final keypress pause; `RELOOP_NO_BROWSER=1` suppresses opening the browser and login note. `-LibraryOnly` is reserved for the installer tests and does not perform installation.
 
 ## Troubleshooting
 
