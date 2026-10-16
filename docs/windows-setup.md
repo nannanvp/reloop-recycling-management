@@ -18,7 +18,7 @@ References: [Oracle XE installation instructions](https://docs.oracle.com/en/dat
 2. Installs to `%LOCALAPPDATA%\ReLoop`. A marker in `.local\install-state.json` records the repository revision. Existing managed installations are reused without source replacement; other nonempty directories are refused.
 3. Downloads Java 17 and Maven 3.9.9 into `.local`, verifies their published checksums, and checks that both run. No global PATH or Java settings are changed.
 4. Finds Oracle XE and SQL*Plus through Windows service/registry information. If absent, offers to download Oracle's official checksum-verified installation archive and launch its signed installer. No license acceptance is automated.
-5. Starts existing XE/listener services where permitted. An administrator is needed if Windows denies service control.
+5. Starts existing XE/listener services where permitted and checks the database instance separately. If the service is running but the instance is idle, it attempts normal `STARTUP`. Authentication, recovery or corruption errors stop installation; it never uses forced recovery or replaces data files. An administrator is needed if Windows denies service control.
 6. Connects locally using SQL*Plus OS authentication, opens a mounted `XEPDB1`, and provisions the ReLoop schema without deleting data or resetting existing account passwords. Existing incomplete schemas and missing credentials stop setup with a recovery message.
 7. Builds and launches the Java application, confirms HTTP readiness, writes `Start-ReLoop.bat` and `Stop-ReLoop.bat` into the project folder, and opens the browser and the local login note.
 
@@ -54,6 +54,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -InstallDir "D
 | SQL*Plus OS authentication fails | Use an account in Oracle's local DBA group. After installing Oracle, sign out of Windows and back in; reboot if requested by the installer. |
 | Existing accounts, missing credentials | Keep the existing database. Privately copy the original project's `.local\db-secrets.json` to the new installation's `.local` folder, or keep using the original project. Never publish the file. |
 | Partial schema detected | Stop and repair/restore it with the database administrator. The bootstrapper will not drop tables to recover automatically. |
+| Oracle startup reports corruption or recovery errors | Stop and have the existing database restored/repaired by its administrator. Do not reinstall over it or delete database files. The installer deliberately stops at this error. |
 | Listener uses another port | Use `install.ps1 -OraclePort <port>` on a fresh installation. An existing config retains its saved port. |
 | Port 8080 busy | Stop the other service or the previous ReLoop instance, then rerun. Do not run two project copies against the same local port. |
 | Build/server failure | Read `.local\server.log` and `.local\server-error.log` in the installation folder; rerun after addressing the error. |
@@ -62,6 +63,8 @@ Repeated setup does not fetch updates into an existing managed installation. Thi
 
 ## Validation limits
 
-Installer tests cover archive-path validation, pinned downloads, existing-directory protection, rerun preservation, Oracle-account collision handling, incomplete-schema refusal, credential preservation and BOM-free JSON generation under Windows PowerShell. Fresh Oracle installation needs a separate clean Windows machine and interactive wizard; it has not been simulated by uninstalling or replacing the developer's working Oracle instance.
+On October 16, 2026, 25 isolated installer tests passed under Windows PowerShell. They cover archive-path validation, pinned downloads, existing-directory protection, rerun preservation, Oracle-account collision handling, incomplete-schema refusal, credential preservation and BOM-free JSON generation. A live GitHub archive download and separate portable Java/Maven installation were also verified.
+
+The standalone BAT successfully fetched its installer and reached the Oracle stage in a separate installation folder. A full application launch was blocked by an existing Oracle database corruption error during normal startup; no data files were replaced or repaired. Fresh Oracle installation needs a separate clean Windows machine and interactive wizard and has not been validated on a clean VM.
 
 Run the isolated tests with `powershell -NoProfile -ExecutionPolicy Bypass -File tests\bootstrap-tests.ps1`. They use a fake SQL*Plus process for provisioning scenarios and never reset the real database.

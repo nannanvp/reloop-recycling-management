@@ -162,6 +162,20 @@ function Ensure-Oracle([string]$Cache,[bool]$Unattended){
  $version=& $sqlplus -V 2>&1
  if($LASTEXITCODE -ne 0 -or "$version" -notmatch 'Release 21\.'){throw 'This bootstrapper requires Oracle XE/SQL*Plus 21c. It will not upgrade or remove an existing Oracle installation.'}
  $env:ORACLE_SID='XE';$env:PATH=(Split-Path $sqlplus -Parent)+';'+$env:PATH
+ $probe="WHENEVER SQLERROR EXIT SQL.SQLCODE`nSET HEADING OFF FEEDBACK OFF PAGESIZE 0`nSELECT status FROM v`$instance;`nEXIT`n"
+ $probeOutput=@($probe | & $sqlplus -L -s '/ as sysdba' 2>&1)
+ $probeCode=$LASTEXITCODE;$probeText=$probeOutput -join "`n"
+ if($probeText -match 'ORA-01034|ORA-01012'){
+  Write-Host 'Oracle service is running but its database instance is down. Starting the existing XE instance...'
+  $startup="WHENEVER SQLERROR EXIT SQL.SQLCODE`nSTARTUP`nEXIT`n"
+  $startupOutput=@($startup | & $sqlplus -L -s '/ as sysdba' 2>&1)
+  if($LASTEXITCODE -ne 0 -or ($startupOutput -join "`n") -match '(?m)^\s*(ORA-|SP2-)'){throw ('Oracle could not start its existing instance: '+($startupOutput -join "`n"))}
+  $startupOutput | Out-Host
+ }elseif($probeCode -ne 0 -or $probeText -match '(?m)^\s*(ORA-|SP2-)'){
+  throw ('Oracle OS authentication failed. Use the Windows account that installed Oracle; sign out and back in after a new install to refresh ORA_DBA membership. '+$probeText)
+ }elseif($probeText.Trim() -ne 'OPEN'){
+  throw ('Oracle XE is in state '+$probeText.Trim()+'. Ask the database administrator to open it normally before rerunning setup; this installer will not force recovery.')
+ }
  return $sqlplus
 }
 function Write-Launchers([string]$Target){

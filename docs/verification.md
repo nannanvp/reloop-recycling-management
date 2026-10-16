@@ -17,3 +17,9 @@ The following checks were run against the local Oracle-backed application on Oct
 The application runs locally at `http://localhost:8080`. GitHub publication distributes the source; no cloud deployment is included.
 
 The plan requested Spring Boot 3.5.16; the delivered build pins Spring Boot 3.5.7. The project was verified using that actual dependency set. Processing consumes complete material lines, rewards are illustrative points, and collected records are immutable in this version. A simulated Oracle outage was not tested; the backend handles connection failures without a mock-data fallback.
+
+## Windows bootstrapper checks — October 16, 2026
+
+`tests/bootstrap-tests.ps1` passed 25 isolated checks under Windows PowerShell 5.1. Live GitHub source download and portable Java 17 / Maven 3.9.9 installation were verified in separate folders. Existing private configuration and the primary project source were preserved.
+
+The standalone BAT downloaded its installer and reached the Oracle stage. The pre-existing Oracle instance was unavailable despite its Windows service running; normal startup reported `ORA-01578` for `UNDOTBS01.DBF`. Setup stopped without forcing recovery or replacing database files. Full application startup on that date and fresh Oracle installation on a clean Windows VM remain unverified. This does not change the dated October 10 application test results above.
